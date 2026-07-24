@@ -5,10 +5,13 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
+
+import io.github.agentxzy.inboxpilot.entity.Deadline;
 import io.github.agentxzy.inboxpilot.entity.Digest;
 import io.github.agentxzy.inboxpilot.entity.Email;
 import io.github.agentxzy.inboxpilot.entity.EmailSummary;
@@ -108,7 +111,16 @@ public class AiCreditsProvider implements AiProvider {
             digest.setEmailSummaries(summaries);
             digest.setCategoryCounts(counts);
             digest.setActionItems(actionItems);
-            digest.setDeadlines(List.of());   // structured deadline parsing is a later step
+            List<Deadline> deadlineList = new ArrayList<>();
+            for (EmailSummary es : summaries) {
+                if (es.getDeadline() != null) {
+                    Deadline d = new Deadline();
+                    d.setDescription(es.getSubject());
+                    d.setSourceEmailId(es.getSender());
+                    deadlineList.add(d);
+                }
+            }
+            digest.setDeadlines(deadlineList);  // structured deadline parsing is a later step
             digest.setSummaryText(summaries.size() + " emails processed, " + actionItems.size() + " need action.");
             if (emailsNode.size() != totalEmails) {
                 // AI didn't return 1:1 — log it, don't trust this response's structure

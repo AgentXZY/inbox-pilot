@@ -7,9 +7,11 @@ import org.springframework.web.client.RestClient;
 import tools.jackson.databind.JsonNode;
 
 import java.time.LocalDateTime;
-import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.Base64;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 @Component
 public class GmailEmailSource implements EmailSource {
@@ -19,8 +21,8 @@ public class GmailEmailSource implements EmailSource {
     @Override
     public List<Email> fetchRecentEmails(String accessToken, int maxResults) {
         List<Email> emails = new ArrayList<>();
+        Set<String> seenIds = new HashSet<>();
 
-        // Step 1: list message IDs
         JsonNode listResponse = client.get()
             .uri("/users/me/messages?maxResults=" + maxResults + "&q=newer_than:1d")
             .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken)
@@ -28,14 +30,18 @@ public class GmailEmailSource implements EmailSource {
             .body(JsonNode.class);
 
         if (listResponse == null || listResponse.get("messages") == null) {
-            return emails; // empty inbox or no recent mail
+            return emails;
         }
 
-        // Step 2: fetch each message's details
         for (JsonNode msgRef : listResponse.get("messages")) {
             String id = msgRef.get("id").asString();
+
+            if (!seenIds.add(id)) {
+                continue; // already processed this exact message ID — skip the duplicate
+            }
+
             JsonNode msg = client.get()
-                .uri("/users/me/messages/" + id + "?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date")
+                .uri("/users/me/messages/" + id + "?format=full")
                 .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken)
                 .retrieve()
                 .body(JsonNode.class);
@@ -50,9 +56,9 @@ public class GmailEmailSource implements EmailSource {
         Email email = new Email();
         email.setId(msg.get("id").asString());
         email.setSnippet(msg.get("snippet") != null ? msg.get("snippet").asString() : "");
-        email.setBody(email.getSnippet()); // metadata format doesn't include full body; snippet is a preview
 
-        JsonNode headers = msg.get("payload").get("headers");
+        JsonNode payload = msg.get("payload");
+        JsonNode headers = payload.get("headers");
         for (JsonNode header : headers) {
             String name = header.get("name").asString();
             String value = header.get("value").asString();
@@ -60,7 +66,38 @@ public class GmailEmailSource implements EmailSource {
             if ("Subject".equals(name)) email.setSubject(value);
         }
 
-        email.setReceivedAt(LocalDateTime.now()); // Gmail's internalDate needs separate parsing, placeholder for now
+        String body = extractBody(payload);
+        email.setBody(body != null && !body.isBlank() ? body : email.getSnippet());
+
+        email.setReceivedAt(LocalDateTime.now());
         return email;
+    }
+
+    private String extractBody(JsonNode payload) {
+        String mimeType = payload.get("mimeType") != null ? payload.get("mimeType").asString() : "";
+
+        if ("text/plain".equals(mimeType) && payload.get("body") != null && payload.get("body").get("data") != null) {
+            return decodeBase64Url(payload.get("body").get("data").asString());
+        }
+
+        if (payload.get("parts") != null) {
+            for (JsonNode part : payload.get("parts")) {
+                String result = extractBody(part);
+                if (result != null && !result.isBlank()) {
+                    return result;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private String decodeBase64Url(String data) {
+        try {
+            byte[] decoded = Base64.getUrlDecoder().decode(data);
+            return new String(decoded, java.nio.charset.StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            return null;
+        }
     }
 }
