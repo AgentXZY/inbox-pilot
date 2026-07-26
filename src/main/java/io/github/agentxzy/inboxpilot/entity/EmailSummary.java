@@ -7,7 +7,8 @@ public class EmailSummary {
     private String sender;
     private String subject;
     private String category;
-    private String importance;   // HIGH, MEDIUM, LOW
+    private String importance;
     private String summary;
-    private String deadline;     // free text like "Sep 1, 2026" or null
+    private String deadline;
+    private String link;
 }

@@ -13,4 +13,5 @@ public class Email {
     private String body;
     private LocalDateTime receivedAt;
     private boolean read;
+    private String gmailLink;
 }

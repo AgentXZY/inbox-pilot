@@ -72,13 +72,13 @@ public class AiCreditsProvider implements AiProvider {
             .body(JsonNode.class);
 
         String rawText = response.get("choices").get(0).get("message").get("content").asString();
-        return parseDigest(rawText, emails.size());
+        return parseDigest(rawText, emails);
     }
 
-    private Digest parseDigest(String rawText, int totalEmails) {
+    private Digest parseDigest(String rawText, List<Email> originalEmails) {
         Digest digest = new Digest();
         digest.setDate(LocalDate.now());
-        digest.setTotalEmails(totalEmails);   // always Java's own count, never trust the AI's
+        digest.setTotalEmails(originalEmails.size());
 
         try {
             String cleaned = rawText.replaceAll("```json|```", "").trim();
@@ -88,7 +88,9 @@ public class AiCreditsProvider implements AiProvider {
             List<EmailSummary> summaries = new ArrayList<>();
             Map<String, Integer> counts = new HashMap<>();
             List<String> actionItems = new ArrayList<>();
+            List<Deadline> deadlineList = new ArrayList<>();
 
+            int index = 0;
             for (JsonNode e : emailsNode) {
                 EmailSummary es = new EmailSummary();
                 es.setSender(e.get("sender").asString());
@@ -100,35 +102,33 @@ public class AiCreditsProvider implements AiProvider {
                 JsonNode deadlineNode = e.get("deadline");
                 es.setDeadline(deadlineNode != null && !deadlineNode.isNull() ? deadlineNode.asString() : null);
 
+                if (index < originalEmails.size()) {
+                    es.setLink(originalEmails.get(index).getGmailLink());
+                }
+
                 summaries.add(es);
-                counts.merge(es.getCategory(), 1, Integer::sum);   // Java counts, not the AI
+                counts.merge(es.getCategory(), 1, Integer::sum);
 
                 if ("HIGH".equalsIgnoreCase(es.getImportance())) {
                     actionItems.add(es.getSummary());
                 }
-            }
-
-            digest.setEmailSummaries(summaries);
-            digest.setCategoryCounts(counts);
-            digest.setActionItems(actionItems);
-            List<Deadline> deadlineList = new ArrayList<>();
-            for (EmailSummary es : summaries) {
                 if (es.getDeadline() != null) {
                     Deadline d = new Deadline();
                     d.setDescription(es.getSubject());
                     d.setSourceEmailId(es.getSender());
                     deadlineList.add(d);
                 }
-            }
-            digest.setDeadlines(deadlineList);  // structured deadline parsing is a later step
-            digest.setSummaryText(summaries.size() + " emails processed, " + actionItems.size() + " need action.");
-            if (emailsNode.size() != totalEmails) {
-                // AI didn't return 1:1 — log it, don't trust this response's structure
-                System.err.println("WARNING: AI returned " + emailsNode.size() + " summaries for " + totalEmails + " emails");
+                index++;
             }
 
+            digest.setEmailSummaries(summaries);
+            digest.setCategoryCounts(counts);
+            digest.setActionItems(actionItems);
+            digest.setDeadlines(deadlineList);
+            digest.setSummaryText(summaries.size() + " emails processed, " + actionItems.size() + " need action.");
+
         } catch (Exception ex) {
-            digest.setCategoryCounts(Map.of("Uncategorized", totalEmails));
+            digest.setCategoryCounts(Map.of("Uncategorized", originalEmails.size()));
             digest.setActionItems(List.of());
             digest.setDeadlines(List.of());
             digest.setSummaryText("Could not parse AI response.");
