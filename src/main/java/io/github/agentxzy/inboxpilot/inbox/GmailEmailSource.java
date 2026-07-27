@@ -97,7 +97,11 @@ public class GmailEmailSource implements EmailSource {
         }
 
         email.setBody(combined.toString());
-        email.setReceivedAt(LocalDateTime.now());
+        if (msg.get("internalDate") != null) {
+            long epochMillis = Long.parseLong(msg.get("internalDate").asString());
+            email.setReceivedAt(LocalDateTime.ofInstant(
+                java.time.Instant.ofEpochMilli(epochMillis), java.time.ZoneId.systemDefault()));
+        }
         return email;
     }
 
