@@ -40,7 +40,7 @@ public class ScheduledDigestService {
         currentUserPrincipalName = principalName;
     }
 
-    @Scheduled(fixedRate = 60000) // every 15 minutes
+    //@Scheduled(fixedRate = 60000) // every 15 minutes
     public void pollAndDigest() {
         if (currentUserPrincipalName == null) {
             System.out.println("Poll skipped — no user has logged in yet this session.");

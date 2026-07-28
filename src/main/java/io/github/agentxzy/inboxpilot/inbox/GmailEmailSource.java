@@ -1,35 +1,37 @@
 package io.github.agentxzy.inboxpilot.inbox;
 
 import io.github.agentxzy.inboxpilot.entity.Email;
+import io.github.agentxzy.inboxpilot.ocr.ScannedPdfAnalyzer;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.text.PDFTextStripper;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpHeaders;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 import tools.jackson.databind.JsonNode;
 
+import java.time.Instant;
 import java.time.LocalDateTime;
-import java.util.ArrayList;
-import java.util.Base64;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
+import java.time.ZoneId;
+import java.util.*;
 
 @Component
 public class GmailEmailSource implements EmailSource {
 
     private final RestClient client = RestClient.create("https://gmail.googleapis.com/gmail/v1");
 
+    @Autowired
+    private ScannedPdfAnalyzer scannedPdfAnalyzer;
+
     @Override
     public List<Email> fetchRecentEmails(String accessToken, int maxResults) {
         List<Email> emails = new ArrayList<>();
         Set<String> seenIds = new HashSet<>();
-
         String userEmail = fetchAuthenticatedEmail(accessToken);
 
         JsonNode listResponse = client.get()
-            .uri("/users/me/messages?maxResults=" + maxResults + "&q=newer_than:2d")
+            .uri("/users/me/messages?maxResults=" + maxResults + "&q=newer_than:1d")
             .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken)
             .retrieve()
             .body(JsonNode.class);
@@ -88,30 +90,31 @@ public class GmailEmailSource implements EmailSource {
         }
 
         String bodyText = extractBody(payload);
-        String attachmentText = extractAttachmentText(id, payload, accessToken);
+        StringBuilder attachmentText = new StringBuilder();
+        collectDocumentAttachments(id, payload, accessToken, attachmentText);
 
         StringBuilder combined = new StringBuilder();
         combined.append(bodyText != null && !bodyText.isBlank() ? bodyText : email.getSnippet());
-        if (!attachmentText.isBlank()) {
+        if (attachmentText.length() > 0) {
             combined.append("\n\n--- ATTACHMENT CONTENT ---\n").append(attachmentText);
         }
-
         email.setBody(combined.toString());
+
         if (msg.get("internalDate") != null) {
             long epochMillis = Long.parseLong(msg.get("internalDate").asString());
-            email.setReceivedAt(LocalDateTime.ofInstant(
-                java.time.Instant.ofEpochMilli(epochMillis), java.time.ZoneId.systemDefault()));
+            email.setReceivedAt(LocalDateTime.ofInstant(Instant.ofEpochMilli(epochMillis), ZoneId.systemDefault()));
+        } else {
+            email.setReceivedAt(LocalDateTime.now());
         }
+
         return email;
     }
 
     private String extractBody(JsonNode payload) {
         String mimeType = payload.get("mimeType") != null ? payload.get("mimeType").asString() : "";
-
         if ("text/plain".equals(mimeType) && payload.get("body") != null && payload.get("body").get("data") != null) {
             return decodeBase64Url(payload.get("body").get("data").asString());
         }
-
         if (payload.get("parts") != null) {
             for (JsonNode part : payload.get("parts")) {
                 String result = extractBody(part);
@@ -121,20 +124,19 @@ public class GmailEmailSource implements EmailSource {
         return null;
     }
 
-    private String extractAttachmentText(String messageId, JsonNode part, String accessToken) {
-        StringBuilder combined = new StringBuilder();
-        collectPdfAttachments(messageId, part, accessToken, combined);
-        return combined.toString();
-    }
-
-    private void collectPdfAttachments(String messageId, JsonNode part, String accessToken, StringBuilder combined) {
+    private void collectDocumentAttachments(String messageId, JsonNode part, String accessToken, StringBuilder combined) {
         String filename = part.get("filename") != null ? part.get("filename").asString() : "";
         String mimeType = part.get("mimeType") != null ? part.get("mimeType").asString() : "";
-        boolean isPdf = mimeType.equals("application/pdf") || filename.toLowerCase().endsWith(".pdf");
 
-        if (isPdf && part.get("body") != null && part.get("body").get("attachmentId") != null) {
+        boolean isPdf = mimeType.equals("application/pdf") || filename.toLowerCase().endsWith(".pdf");
+        boolean isImage = mimeType.startsWith("image/") || filename.toLowerCase().matches(".*\\.(png|jpe?g|webp)$");
+
+        if ((isPdf || isImage) && part.get("body") != null && part.get("body").get("attachmentId") != null) {
             String attachmentId = part.get("body").get("attachmentId").asString();
-            String text = fetchAndExtractPdfText(messageId, attachmentId, accessToken);
+            String text = isPdf
+                ? fetchAndExtractPdfText(messageId, attachmentId, accessToken)
+                : fetchAndExtractImageText(messageId, attachmentId, accessToken, mimeType);
+
             if (text != null && !text.isBlank()) {
                 combined.append("\n[Attachment: ").append(filename).append("]\n").append(text).append("\n");
             }
@@ -142,7 +144,7 @@ public class GmailEmailSource implements EmailSource {
 
         if (part.get("parts") != null) {
             for (JsonNode child : part.get("parts")) {
-                collectPdfAttachments(messageId, child, accessToken, combined);
+                collectDocumentAttachments(messageId, child, accessToken, combined);
             }
         }
     }
@@ -159,21 +161,37 @@ public class GmailEmailSource implements EmailSource {
 
             try (PDDocument document = Loader.loadPDF(pdfBytes)) {
                 int totalPages = document.getNumberOfPages();
-                int pagesToRead = Math.min(totalPages, 5); // jist extraction — first 5 pages only
+                int pagesToRead = Math.min(totalPages, 5);
 
                 PDFTextStripper stripper = new PDFTextStripper();
                 stripper.setStartPage(1);
                 stripper.setEndPage(pagesToRead);
                 String text = stripper.getText(document);
 
-                if (text == null || text.isBlank()) {
-                    // Empty extraction almost always means scanned/image-based PDF — needs OCR (not yet implemented)
-                    return "[Scanned document detected — text extraction unavailable, OCR not yet implemented]";
+                if (text != null && !text.isBlank()) {
+                    return text.length() > 3000 ? text.substring(0, 3000) + "... [truncated]" : text;
                 }
-                return text.length() > 3000 ? text.substring(0, 3000) + "... [truncated]" : text;
             }
+            return scannedPdfAnalyzer.analyzeScannedPdf(pdfBytes);
+
         } catch (Exception e) {
-            return null; // corrupted/unreadable attachment — fail silently, don't break the whole digest
+            return null;
+        }
+    }
+
+    private String fetchAndExtractImageText(String messageId, String attachmentId, String accessToken, String mimeType) {
+        try {
+            JsonNode attachmentResponse = client.get()
+                .uri("/users/me/messages/" + messageId + "/attachments/" + attachmentId)
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken)
+                .retrieve()
+                .body(JsonNode.class);
+
+            byte[] imageBytes = Base64.getUrlDecoder().decode(attachmentResponse.get("data").asString());
+            return scannedPdfAnalyzer.analyzeRawImage(imageBytes, mimeType);
+
+        } catch (Exception e) {
+            return null;
         }
     }
 

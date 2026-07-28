@@ -34,10 +34,11 @@ public class GmailDigestController {
 
     @GetMapping("/api/digest/gmail")
     public Digest getGmailDigest(
-            @RegisteredOAuth2AuthorizedClient("google") OAuth2AuthorizedClient client,
+    		@RegisteredOAuth2AuthorizedClient("google") OAuth2AuthorizedClient client,
             @AuthenticationPrincipal OAuth2User principal,
             @RequestParam(defaultValue = "false") boolean includeSeen) {
 
+        System.out.println(">>> MANUAL REQUEST HIT: /api/digest/gmail?includeSeen=" + includeSeen);
         ScheduledDigestService.registerLoggedInUser(principal.getName());
 
         String accessToken = client.getAccessToken().getTokenValue();

@@ -2,17 +2,11 @@ package io.github.agentxzy.inboxpilot.ai;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.time.format.DateTimeParseException;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-
+import java.util.*;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
-
 import io.github.agentxzy.inboxpilot.entity.Deadline;
 import io.github.agentxzy.inboxpilot.entity.Digest;
 import io.github.agentxzy.inboxpilot.entity.Email;
@@ -38,38 +32,35 @@ public class AiCreditsProvider implements AiProvider {
     public Digest generateDigest(List<Email> emails) {
         RestClient client = RestClient.create(baseUrl);
 
-        String systemPrompt = "You are an email assistant. You will be given a numbered list of exactly " + emails.size() + " emails. " +
-        	    "Return EXACTLY " + emails.size() + " entries in your response, one per email, in the same order, even if an email contains multiple sub-topics inside it — treat the whole email as ONE entry. " +
-        	    "Today's date is " + LocalDate.now() + ". When an email mentions a date without a year, assume it refers to the nearest future occurrence of that date relative to today. " +
-        	    "Respond ONLY with raw JSON, no markdown, matching this shape: " +
-        	    "{\"emails\": [{\"sender\": string, \"subject\": string, " +
-        	    "\"category\": one of [College, Work, Finance, Shopping, Social, Newsletters, Promotions, Spam, Other, Security], " +
-        	    "\"importance\": one of [HIGH, MEDIUM, LOW], " +
-        	    "\"summary\": a one-sentence summary of the whole email, " +
-        	    "\"deadline\": a specific date/time mentioned, or null}]}. " +
-        	    "\"Importance guide — apply strictly: \" +\r\n"
-        	    + "\"HIGH = time-sensitive with a concrete deadline/event within 48 hours, security alerts, real job/internship offers requiring action. \" +\r\n"
-        	    + "\"MEDIUM = worth knowing, no urgent action needed, deadline more than 48 hours away. \" +\r\n"
-        	    + "\"LOW = newsletters, generic promotions, no actionable content. \" +\r\n"
-        	    + "\"When uncertain between two levels, choose the LOWER one."+
-        	    "When a deadline exists, format it strictly as ISO-8601: YYYY-MM-DDTHH:MM:SS (24-hour time), or YYYY-MM-DD if no time is mentioned. " +
-        	    "If you cannot determine a real deadline, use null — never guess a format.";
+        String systemPrompt = "You are an email assistant. You will be given a numbered list of exactly " + emails.size() +
+            " emails, each starting with [EMAIL_ID:n]. For EACH email, return exactly ONE entry in your response. " +
+            "You MUST include the matching \"emailId\": n field. Never skip, merge, or reorder emails, and never " +
+            "return the same emailId twice. " +
+            "Respond ONLY with raw JSON, no markdown: " +
+            "{\"emails\": [{\"emailId\": integer, " +
+            "\"category\": one of [College, Work, Finance, Shopping, Social, Newsletters, Promotions, Spam, Other, Security], " +
+            "\"importance\": one of [HIGH, MEDIUM, LOW], \"summary\": string, \"deadline\": string in ISO-8601 (YYYY-MM-DDTHH:MM:SS) or null}]}. " +
+            "Today's date is " + LocalDate.now() + ". Anchor relative dates ('tomorrow', 'today') to this date. " +
+            "Importance guide — apply strictly: HIGH = concrete deadline/event within 48 hours, security alerts/OTPs, " +
+            "real job/internship offers requiring action. MEDIUM = worth knowing, no urgent action, deadline more than 48 hours away. " +
+            "LOW = newsletters, generic promotions, no actionable content.";
 
         StringBuilder userPrompt = new StringBuilder("Emails:\n");
-        for (Email e : emails) {
-            userPrompt.append("- From: ").append(e.getSender())
+        for (int i = 0; i < emails.size(); i++) {
+            Email e = emails.get(i);
+            userPrompt.append("[EMAIL_ID:").append(i).append("] From: ").append(e.getSender())
                       .append(" | Subject: ").append(e.getSubject())
                       .append(" | Body: ").append(e.getBody()).append("\n\n");
         }
 
         Map<String, Object> requestBody = Map.of(
-        	    "model", model,
-        	    "temperature", 0,
-        	    "messages", List.of(
-        	        Map.of("role", "system", "content", systemPrompt),
-        	        Map.of("role", "user", "content", userPrompt.toString())
-        	    )
-        	);
+            "model", model,
+            "temperature", 0,
+            "messages", List.of(
+                Map.of("role", "system", "content", systemPrompt),
+                Map.of("role", "user", "content", userPrompt.toString())
+            )
+        );
 
         JsonNode response = client.post()
             .uri("/chat/completions")
@@ -96,27 +87,26 @@ public class AiCreditsProvider implements AiProvider {
             Map<String, Integer> counts = new HashMap<>();
             List<String> actionItems = new ArrayList<>();
             List<Deadline> deadlineList = new ArrayList<>();
+            Set<Integer> seenEmailIds = new HashSet<>();
 
-            int index = 0;
             for (JsonNode e : emailsNode) {
+                if (e.get("emailId") == null) continue;
+                int emailId = e.get("emailId").asInt();
+                if (emailId < 0 || emailId >= originalEmails.size()) continue;
+                if (!seenEmailIds.add(emailId)) continue; // hard block on duplicate emailId
+
+                Email original = originalEmails.get(emailId);
+
                 EmailSummary es = new EmailSummary();
-                es.setSender(e.get("sender").asString());
-                es.setSubject(e.get("subject").asString());
-                es.setCategory(e.get("category").asString());
-                es.setImportance(e.get("importance").asString());
-                es.setSummary(e.get("summary").asString());
+                es.setSender(original.getSender());
+                es.setSubject(original.getSubject());
+                es.setLink(original.getGmailLink());
+                es.setCategory(e.get("category") != null ? e.get("category").asString() : "Other");
+                es.setImportance(e.get("importance") != null ? e.get("importance").asString() : "LOW");
+                es.setSummary(e.get("summary") != null ? e.get("summary").asString() : "");
 
                 JsonNode deadlineNode = e.get("deadline");
                 es.setDeadline(deadlineNode != null && !deadlineNode.isNull() ? deadlineNode.asString() : null);
-
-                // match by sender+subject instead of positional index — much harder to silently misalign
-                String matchedLink = originalEmails.stream()
-                    .filter(orig -> orig.getSender() != null && orig.getSender().equals(es.getSender())
-                                  && orig.getSubject() != null && orig.getSubject().equals(es.getSubject()))
-                    .map(Email::getGmailLink)
-                    .findFirst()
-                    .orElse(null);
-                es.setLink(matchedLink);
 
                 summaries.add(es);
                 counts.merge(es.getCategory(), 1, Integer::sum);
@@ -124,29 +114,21 @@ public class AiCreditsProvider implements AiProvider {
                 if ("HIGH".equalsIgnoreCase(es.getImportance())) {
                     actionItems.add(es.getSummary());
                 }
-                if (es.getDeadline() != null) {
-                    boolean isPast = isDeadlineInPast(es.getDeadline());
-                    if (!isPast) {
-                        Deadline d = new Deadline();
-                        d.setDescription(es.getSubject());
-                        d.setSourceEmailId(es.getSender());
-                        deadlineList.add(d);
-                    }
-                index++;
+                if (es.getDeadline() != null && !isDeadlineInPast(es.getDeadline())) {
+                    Deadline d = new Deadline();
+                    d.setDescription(es.getSubject());
+                    d.setSourceEmailId(es.getSender());
+                    deadlineList.add(d);
+                }
             }
-         }
-            
-            summaries.sort((a, b) -> {
-                Map<String, Integer> rank = Map.of("HIGH", 0, "MEDIUM", 1, "LOW", 2);
-                return rank.getOrDefault(a.getImportance(), 3) - rank.getOrDefault(b.getImportance(), 3);
-            });
+
             digest.setEmailSummaries(summaries);
             digest.setCategoryCounts(counts);
             digest.setActionItems(actionItems);
             digest.setDeadlines(deadlineList);
             digest.setSummaryText(summaries.size() + " emails processed, " + actionItems.size() + " need action.");
 
-            } catch (Exception ex) {
+        } catch (Exception ex) {
             digest.setCategoryCounts(Map.of("Uncategorized", originalEmails.size()));
             digest.setActionItems(List.of());
             digest.setDeadlines(List.of());
@@ -154,19 +136,16 @@ public class AiCreditsProvider implements AiProvider {
         }
         return digest;
     }
-        
-        private boolean isDeadlineInPast(String deadlineStr) {
+
+    private boolean isDeadlineInPast(String deadlineStr) {
+        try {
+            return LocalDateTime.parse(deadlineStr).isBefore(LocalDateTime.now());
+        } catch (Exception e1) {
             try {
-                LocalDateTime dt = LocalDateTime.parse(deadlineStr);
-                return dt.isBefore(LocalDateTime.now());
-            } catch (DateTimeParseException e1) {
-                try {
-                    LocalDate d = LocalDate.parse(deadlineStr);
-                    return d.isBefore(LocalDate.now());
-                } catch (DateTimeParseException e2) {
-                    return false; // unparseable — don't silently drop it, better to show than hide incorrectly
-                }
+                return java.time.LocalDate.parse(deadlineStr).isBefore(LocalDate.now());
+            } catch (Exception e2) {
+                return false;
             }
         }
-        
+    }
 }
